@@ -9,6 +9,7 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT;
+const SIX_HOURS = 6 * 60 * 60 * 1000;
 
 // Middleware
 app.use(express.json());
@@ -243,100 +244,150 @@ app.get('/user/info', async (req, res) => {
   }
 });
 
+
+let googleDriveUrl = ''
+// 틱톡 서버가 실제 영상을 가져가는 통로 (스트리밍)
+app.get('/temp-video-stream', async (req, res) => {
+    // 주의: 실제 구현 시에는 n8n에서 받은 google_url을 DB나 변수에 임시 저장했다가 여기서 써야 합니다.
+    // 일단 테스트를 위해 마지막으로 요청된 URL을 사용한다고 가정하거나 고정값으로 테스트해보세요.
+    try {
+        const videoResponse = await axios({
+            method: 'get',
+            url: googleDriveUrl,
+            responseType: 'stream'
+        });
+        res.setHeader('Content-Type', 'video/mp4');
+        videoResponse.data.pipe(res);
+    } catch (e) {
+        res.status(500).send("Video streaming failed");
+    }
+});
+
 // 6. Simple video upload API - takes file path and title
 app.post('/video/direct-post', async (req, res) => {
-  try {
-    const access_token = await getValidAccessToken();
-    const { file_path, title } = req.body;
+    const { video_url, caption } = req.body;
+    const accessToken = await getValidAccessToken(); // 프로젝트 내부의 토큰 관리 함수 활용
+    googleDriveUrl = video_url
 
-    if (!file_path) {
-      return res.status(400).json({ error: 'file_path is required' });
+    try {
+        // 1. 틱톡에 '내 도메인'의 영상을 가져가라고 초기화 요청을 보냅니다.
+        // (실제 파일은 틱톡이 내 서버로 다시 요청할 때 보내줍니다)
+        const response = await axios.post(
+            'https://open.tiktokapis.com/v2/post/publish/inbox/video/init/',
+            {
+                "post_info": {
+                    "caption": caption || "New Video",
+                    "privacy_level": "PUBLIC_TO_EVERYONE",
+                    "disable_comment": false
+                },
+                "source_info": {
+                    "source": "PULL_FROM_URL",
+                    "video_url": "https://www.acaxiaa.store/temp-video-stream" // 틱톡이 찌를 내 서버 주소
+                }
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json; charset=UTF-8'
+                }
+            }
+        );
+
+        // 2. 틱톡 서버가 내 서버(temp-video-stream)로 파일을 요청할 때 
+        // 구글 드라이브의 파일을 스트리밍해주는 엔드포인트를 아래에 별도로 만듭니다.
+        
+        res.json({ success: true, data: response.data });
+    } catch (error) {
+        console.error('TikTok API Error:', error.response ? error.response.data : error.message);
+        res.status(500).json({ success: false, error: error.response ? error.response.data : error.message });
     }
+});
 
-    if (!title) {
-      return res.status(400).json({ error: 'title is required' });
-    }
+// 틱톡 영상 통계 가져오기 엔드포인트
+app.post('/video/metrics', async (req, res) => {
+    const { publish_id } = req.body;
+    const accessToken = await getValidAccessToken(); // token.json에서 토큰 읽어오는 기존 로직 활용
+	
+	console.log(req.body)
+    try {
+        // [2단계] publish_id를 사용하여 public_video_id 확보
+        const statusResponse = await axios.post(
+            'https://open.tiktokapis.com/v2/post/publish/status/fetch/',
+	    {
+                publish_id: publish_id
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json; charset=UTF-8'
+                },
+            }
+        );
 
-    // Check if file exists
-    if (!fs.existsSync(file_path)) {
-      return res.status(400).json({ error: 'File not found at specified path' });
-    }
+        const videoId = statusResponse.data.data.publicaly_available_post_id[0];
+	console.log(videoId, statusResponse.data)
 
-    // Get file stats
-    const stats = fs.statSync(file_path);
-    const fileSize = stats.size;
-    const chunkSize = (fileSize < 10 * 1024 * 1024) ? fileSize : 10 * 1024 * 1024; // 10MB chunks
-    const totalChunkCount = Math.ceil(fileSize / chunkSize);
-
-    // Step 1: Initialize video upload
-    console.log('Initializing video upload...');
-    const initResponse = await axios.post('https://open.tiktokapis.com/v2/post/publish/video/init/', {
-      post_info: {
-        title: title,
-        privacy_level: 'PUBLIC_TO_EVERYONE',
-        disable_duet: false,
-        disable_comment: false,
-        disable_stitch: false,
-        video_cover_timestamp_ms: 1000
-      },
-      source_info: {
-        source: 'FILE_UPLOAD',
-        video_size: fileSize,
-        chunk_size: chunkSize,
-        total_chunk_count: totalChunkCount
-      }
-    }, {
-      headers: {
-        Authorization: `Bearer ${access_token}`,
-        'Content-Type': 'application/json; charset=UTF-8',
-      }
-    });
-
-    if (initResponse.data.error && initResponse.data.error.code !== 'ok') {
-      throw new Error(`TikTok API Error: ${initResponse.data.error.message}`);
-    }
-
-    const { publish_id, upload_url } = initResponse.data.data;
-    console.log('Upload initialized:', { publish_id, upload_url });
-
-    // Step 2: Upload video file to TikTok's designated URL
-    console.log('Uploading video file...');
-    const videoBuffer = fs.readFileSync(file_path);
-    
-    const uploadResponse = await axios.put(upload_url, videoBuffer, {
-      headers: {
-        'Content-Range': `bytes 0-${fileSize - 1}/${fileSize}`,
-        'Content-Type': 'video/mp4',
-        'Content-Length': fileSize
-      },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity
-    });
-
-    console.log('Video upload requested. Check status at http://localhost:${PORT}/video/status?publish_id=${publish_id}');
-
-    // Return success response with publish_id
-    res.json({
-      success: true,
-      message: 'Video upload requested successfully',
-      data: {
-        publish_id: publish_id,
-        status_url: `http://localhost:${PORT}/video/status?publish_id=${publish_id}`,
-        file_info: {
-          path: file_path,
-          size: fileSize,
-          size_mb: (fileSize / 1024 / 1024).toFixed(2)
+        if (!videoId) {
+            return res.json({ 
+                success: false, 
+                status: statusResponse.data.data.status,
+                message: "아직 영상이 처리 중이거나 Video ID가 생성되지 않았습니다." 
+            });
         }
-      }
-    });
 
-  } catch (err) {
-    console.error('Video upload error:', err.response?.data || err.message);
-    res.status(500).json({
-      error: 'Video upload failed',
-      details: err.response?.data || err.message
-    });
-  }
+//test
+// [검증 로직] 내 계정의 실제 ID들과 대조해보기
+const listResponse = await axios.post(
+    'https://open.tiktokapis.com/v2/video/list/',
+    {}, 
+    {
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+        params: { "fields": "id,title" } 
+    }
+);
+console.log("listResponse: ", listResponse.data)
+
+// listResponse에서 온 id들이 진짜 API가 인식하는 '살아있는' ID들입니다.
+console.log("실제 조회 가능한 ID 목록:", listResponse.data.data.videos.map(v => v.id));
+
+//test
+
+        // [3단계] 확보한 videoId로 상세 통계(Statistics) 조회
+        const metricsResponse = await axios.post(
+            'https://open.tiktokapis.com/v2/video/query/',
+            {
+                "filters": {
+                    "video_ids": [videoId]
+                }
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                },
+                params: {
+                    "fields": "id,title,like_count,comment_count_share_count,view_count" // 통계 필드 명시 필수
+                }
+            }
+        );
+
+        // n8n으로 최종 결과 반환
+        const stats = metricsResponse.data.data.videos[0].statistics;
+        res.json({
+            success: true,
+            video_id: videoId,
+            metrics: {
+                view_count: stats.view_count,
+                like_count: stats.like_count,
+                share_count: stats.share_count,
+                comment_count: stats.comment_count
+            }
+        });
+
+    } catch (error) {
+        console.error('Metrics Error:', error.response ? error.response.data : error.message);
+        res.status(500).json({ success: false, error: error.message });
+    }
 });
 
 // 7. Check video upload status using query parameters
@@ -515,3 +566,5 @@ app.listen(PORT, () => {
   console.log(`🔐 Perform OAuth flow: http://localhost:${PORT}/auth/login`);
   console.log(`🛑 Shutdown: POST http://localhost:${PORT}/shutdown`);
 });
+
+setInterval(getValidAccessToken, SIX_HOURS);
