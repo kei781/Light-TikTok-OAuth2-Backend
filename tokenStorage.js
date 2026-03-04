@@ -4,24 +4,17 @@ const crypto = require('crypto');
 
 class SecureTokenStorage {
   constructor(encryptionKey, filePath = './tokens.encrypted.json') {
-    this.encryptionKey = encryptionKey || this.generateEncryptionKey();
     this.filePath = filePath;
-    
-    // Ensure the encryption key is at least 32 bytes for AES-256
-    if (this.encryptionKey.length < 32) {
-      this.encryptionKey = crypto.scryptSync(this.encryptionKey, 'salt', 32).toString('hex');
-    }
+    const salt = 'fixed_salt'; // 키 파생을 위한 고정값
+
+    // AES-256을 위해 키를 항상 32바이트(256비트) Buffer로 변환
+    this.key = crypto.scryptSync(encryptionKey || 'default_secret', salt, 32);
   }
 
-  // Generate a random encryption key if none provided
-  generateEncryptionKey() {
-    return crypto.randomBytes(32).toString('hex');
-  }
-
-  // Encrypt data
+  // 암호화 (수정됨)
   encrypt(data) {
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipher('aes-256-cbc', this.encryptionKey);
+    const iv = crypto.randomBytes(16); // 16바이트 랜덤 IV 생성
+    const cipher = crypto.createCipheriv('aes-256-cbc', this.key, iv); // iv 전달 필수
     
     let encrypted = cipher.update(JSON.stringify(data), 'utf8', 'hex');
     encrypted += cipher.final('hex');
@@ -32,10 +25,13 @@ class SecureTokenStorage {
     };
   }
 
-  // Decrypt data
+  // 복호화 (수정됨)
   decrypt(encryptedData) {
     try {
-      const decipher = crypto.createDecipher('aes-256-cbc', this.encryptionKey);
+      if (!encryptedData.iv || !encryptedData.encrypted) return null;
+
+      const iv = Buffer.from(encryptedData.iv, 'hex');
+      const decipher = crypto.createDecipheriv('aes-256-cbc', this.key, iv); // iv 사용
       
       let decrypted = decipher.update(encryptedData.encrypted, 'hex', 'utf8');
       decrypted += decipher.final('utf8');
@@ -47,7 +43,7 @@ class SecureTokenStorage {
     }
   }
 
-  // Save tokens to encrypted file
+  // 이하 saveTokens, loadTokens 등의 로직은 동일하지만 내부에서 수정된 encrypt/decrypt를 호출함
   saveTokens(tokens) {
     try {
       const encrypted = this.encrypt(tokens);
@@ -60,31 +56,25 @@ class SecureTokenStorage {
     }
   }
 
-  // Load tokens from encrypted file
   loadTokens() {
     try {
       if (!fs.existsSync(this.filePath)) {
         console.log('No existing tokens found');
         return null;
       }
-
       const encryptedData = JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
       const tokens = this.decrypt(encryptedData);
-      
       if (tokens) {
         console.log('Tokens loaded successfully');
         return tokens;
-      } else {
-        console.log('Failed to decrypt tokens');
-        return null;
       }
+      return null;
     } catch (error) {
       console.error('Failed to load tokens:', error.message);
       return null;
     }
   }
 
-  // Clear stored tokens
   clearTokens() {
     try {
       if (fs.existsSync(this.filePath)) {
@@ -98,15 +88,10 @@ class SecureTokenStorage {
     }
   }
 
-  // Check if tokens exist and are valid
   hasValidTokens() {
     const tokens = this.loadTokens();
-    if (!tokens || !tokens.access_token) {
-      return false;
-    }
-    
-    // Check if token is expired (with 5 minute buffer)
-    const bufferTime = 5 * 60 * 1000; // 5 minutes
+    if (!tokens || !tokens.access_token) return false;
+    const bufferTime = 5 * 60 * 1000;
     return Date.now() < (tokens.expires_at - bufferTime);
   }
 }

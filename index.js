@@ -11,13 +11,12 @@ const app = express();
 const PORT = process.env.PORT;
 const SIX_HOURS = 6 * 60 * 60 * 1000;
 
-// Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Initialize secure storage with encryption key from environment
 const tokenStorage = new SecureTokenStorage(process.env.ENCRYPTION_KEY);
-
+const redirect_uri = "https://tiktok.acaxiaa.store/auth/callback";
 // Store code verifier for PKCE flow
 let codeVerifier = null;
 
@@ -79,10 +78,10 @@ app.get('/auth/login', (req, res) => {
   // Generate PKCE code verifier and challenge
   const pkce = generatePKCE();
   codeVerifier = pkce.verifier; // Store for later use in callback
-
+  
   const params = {
     client_key: process.env.TIKTOK_CLIENT_KEY,
-    redirect_uri: process.env.TIKTOK_REDIRECT_URI,
+    redirect_uri,
     response_type: 'code',
     scope: 'user.info.basic,user.info.profile,user.info.stats,video.publish,video.upload',
     state: 'secureRandomState123', // optional
@@ -110,7 +109,7 @@ app.get('/auth/callback', async (req, res) => {
       client_secret: process.env.TIKTOK_CLIENT_SECRET,
       code: code,
       grant_type: 'authorization_code',
-      redirect_uri: process.env.TIKTOK_REDIRECT_URI,
+      redirect_uri,
       code_verifier: codeVerifier
     });
 
@@ -282,7 +281,7 @@ app.post('/video/direct-post', async (req, res) => {
                 },
                 "source_info": {
                     "source": "PULL_FROM_URL",
-                    "video_url": "https://www.acaxiaa.store/temp-video-stream" // 틱톡이 찌를 내 서버 주소
+                    "video_url": "https://tiktok.acaxiaa.store/temp-video-stream" // 틱톡이 찌를 내 서버 주소
                 }
             },
             {
@@ -308,24 +307,22 @@ app.post('/video/metrics', async (req, res) => {
     const { publish_id } = req.body;
     const accessToken = await getValidAccessToken(); // token.json에서 토큰 읽어오는 기존 로직 활용
 	
-	console.log(req.body)
     try {
         // [2단계] publish_id를 사용하여 public_video_id 확보
         const statusResponse = await axios.post(
-            'https://open.tiktokapis.com/v2/post/publish/status/fetch/',
-	    {
-                publish_id: publish_id
+          'https://open.tiktokapis.com/v2/post/publish/status/fetch/',
+	        {
+            publish_id: publish_id
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json; charset=UTF-8'
             },
-            {
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`,
-                    'Content-Type': 'application/json; charset=UTF-8'
-                },
-            }
+          }
         );
 
         const videoId = statusResponse.data.data.publicaly_available_post_id[0];
-	console.log(videoId, statusResponse.data)
 
         if (!videoId) {
             return res.json({ 
@@ -334,23 +331,6 @@ app.post('/video/metrics', async (req, res) => {
                 message: "아직 영상이 처리 중이거나 Video ID가 생성되지 않았습니다." 
             });
         }
-
-//test
-// [검증 로직] 내 계정의 실제 ID들과 대조해보기
-const listResponse = await axios.post(
-    'https://open.tiktokapis.com/v2/video/list/',
-    {}, 
-    {
-        headers: { 'Authorization': `Bearer ${accessToken}` },
-        params: { "fields": "id,title" } 
-    }
-);
-console.log("listResponse: ", listResponse.data)
-
-// listResponse에서 온 id들이 진짜 API가 인식하는 '살아있는' ID들입니다.
-console.log("실제 조회 가능한 ID 목록:", listResponse.data.data.videos.map(v => v.id));
-
-//test
 
         // [3단계] 확보한 videoId로 상세 통계(Statistics) 조회
         const metricsResponse = await axios.post(
